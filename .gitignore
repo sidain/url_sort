@@ -1,0 +1,25 @@
+# Secrets
+.env
+pushbullet_api_key.txt
+
+# Runtime logs, dead-link audits, sync state
+logs/
+
+# Staging/archive dirs created by the import pipelines (bookmarks, loose-text URLs,
+# Pushbullet exports) -- transient working state, not source
+archives/
+
+# Local working directory the sorter scans/moves files out of
+2bsorted/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# OS cruft
+.DS_Store
+Thumbs.db
