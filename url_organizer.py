@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import csv
 import json
@@ -20,9 +21,29 @@ from urllib3.exceptions import MaxRetryError, TimeoutError as urllib3_TimeoutErr
 from bs4 import BeautifulSoup
 import ollama
 
+
+# Get the absolute path of the directory where this script is located
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# Change the current working directory to the script's folder
+os.chdir(script_dir)
+print(f"Current working directory is now: {os.getcwd()}")
+
+
 # ==================== CONFIGURATION ====================
 SOURCE_DIR = Path("./2bsorted")
 LOGS_DIR = Path("./logs")
+ARCHIVES_LOGS_DIR = LOGS_DIR / "archives"  # Subfolder inside logs for old logs/csv files[cite: 1]
+
+# Archive existing log and csv files (excluding pushbullet_sync_state.json) before new ones are generated[cite: 1]
+if LOGS_DIR.exists():
+    ARCHIVES_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    for item in LOGS_DIR.iterdir():
+        if item.is_file() and item != ARCHIVES_LOGS_DIR and item.name != "pushbullet_sync_state.json" and item.suffix in ['.log', '.csv']:
+            try:
+                shutil.move(str(item), str(ARCHIVES_LOGS_DIR / item.name))
+            except Exception as e:
+                print(f"Warning: Could not archive old log/csv file {item.name}: {e}")
+
 DESTINATION_DIR = r"F:\@ STORAGE 1\! DOWNLOADS\@ everything\__urls"
 BASE_TARGET_DIR = Path(DESTINATION_DIR)
 DEAD_LINK_DIR = BASE_TARGET_DIR / "dead_link"
@@ -748,6 +769,27 @@ def fetch_pushbullet_pushes_page(since_modified: float, cursor: str = None) -> d
     response.raise_for_status()
     return response.json()
 
+def dismiss_pushbullet_push(push: dict) -> bool:
+    """Marks one push as dismissed on the live Pushbullet service once it's been fully
+    handled locally (shortcut written / file downloaded / note saved), so it stops showing
+    as active/unread on your phone and other Pushbullet clients. Requires the push's 'iden'.
+    """
+    iden = push.get("iden")
+    if not iden:
+        return False
+    try:
+        response = http_session.post(
+            f"{PUSHBULLET_API_BASE}/{iden}",
+            headers={"Access-Token": PUSHBULLET_API_KEY},
+            json={"dismissed": True},
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        return True
+    except requests.RequestException as e:
+        logger.error(f"Pushbullet sync: failed dismissing push '{iden}': {e}")
+        return False
+
 def download_pushbullet_file(push: dict) -> bool:
     """Downloads one 'file'-type push's attachment into PUSHBULLET_FILES_DIR."""
     file_url = push.get("file_url")
@@ -814,7 +856,7 @@ def sync_pushbullet_pushes(dest_dir: Path = None) -> dict:
     if dest_dir is None:
         dest_dir = SOURCE_DIR
 
-    stats = {"links": 0, "files": 0, "notes": 0, "skipped": 0, "errors": 0}
+    stats = {"links": 0, "files": 0, "notes": 0, "skipped": 0, "errors": 0, "dismiss_failed": 0}
 
     if not PUSHBULLET_API_KEY:
         logger.info("Pushbullet sync: no API key configured, skipping live sync (set the "
@@ -859,13 +901,25 @@ def sync_pushbullet_pushes(dest_dir: Path = None) -> dict:
                 try:
                     write_bookmark_shortcut(dest_dir, title, url, used_names)
                     stats["links"] += 1
+                    if not dismiss_pushbullet_push(push):
+                        stats["dismiss_failed"] += 1
                 except OSError as e:
                     logger.error(f"Pushbullet sync: failed writing shortcut for '{title or url}': {e}")
                     stats["errors"] += 1
             elif push_type == "file":
-                stats["files" if download_pushbullet_file(push) else "errors"] += 1
+                if download_pushbullet_file(push):
+                    stats["files"] += 1
+                    if not dismiss_pushbullet_push(push):
+                        stats["dismiss_failed"] += 1
+                else:
+                    stats["errors"] += 1
             elif push_type == "note":
-                stats["notes" if save_pushbullet_note(push) else "skipped"] += 1
+                if save_pushbullet_note(push):
+                    stats["notes"] += 1
+                    if not dismiss_pushbullet_push(push):
+                        stats["dismiss_failed"] += 1
+                else:
+                    stats["skipped"] += 1
             else:
                 stats["skipped"] += 1
 
@@ -878,7 +932,8 @@ def sync_pushbullet_pushes(dest_dir: Path = None) -> dict:
 
     logger.info(f"Pushbullet sync: {stats['links']} link(s) queued, {stats['files']} file(s) "
                 f"downloaded, {stats['notes']} note(s) saved, {stats['skipped']} skipped, "
-                f"{stats['errors']} error(s). Cursor advanced to modified={highest_modified}.")
+                f"{stats['errors']} error(s), {stats['dismiss_failed']} dismiss failure(s). "
+                f"Cursor advanced to modified={highest_modified}.")
     return stats
 
 def extract_loose_url_and_title(content: str, fallback_title: str) -> tuple[str, str] | None:
